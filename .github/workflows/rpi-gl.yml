@@ -1,0 +1,72 @@
+name: rpi-gl-dmdfix
+
+# Slim replacement for the upstream matrix: builds only the OpenGL Raspberry Pi
+# aarch64 target, which is the one this cabinet runs.
+on:
+  push:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: VPinballX_GL rpi linux aarch64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake nasm bison zlib1g-dev libdrm-dev libgbm-dev libglu1-mesa-dev libegl-dev libgl1-mesa-dev libwayland-dev libwayland-egl-backend-dev libudev-dev libx11-dev libxcursor-dev libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libxrandr-dev libasound2-dev libgpiod-dev
+      - uses: actions/checkout@v6
+      - name: Calculate external cache hash
+        run: |
+          echo "EXT_HASH=$(cat platforms/config.sh platforms/linux-aarch64/external.sh | sha256sum | cut -c1-12)" >> $GITHUB_ENV
+      - name: Restore external cache
+        id: cache
+        uses: actions/cache/restore@v5
+        with:
+          path: external
+          key: sbc-linux-aarch64-Release-external-${{ env.EXT_HASH }}
+          restore-keys: |
+            sbc-linux-aarch64-Release-external-
+      - name: Build external dependencies
+        run: |
+          BUILD_TYPE=Release ./platforms/linux-aarch64/external.sh
+      - if: steps.cache.outputs.cache-hit != 'true'
+        name: Clean external cache
+        run: |
+          find external -type d -name ".git" -exec rm -rf {} + 2>/dev/null || true
+          find external -name "*.tar.gz" -delete 2>/dev/null || true
+          find external \( -name "*.o" -o -name "*.obj" \) -delete 2>/dev/null || true
+      - if: steps.cache.outputs.cache-hit != 'true'
+        name: Save external cache
+        uses: actions/cache/save@v5
+        with:
+          path: external
+          key: sbc-linux-aarch64-Release-external-${{ env.EXT_HASH }}
+      - name: Set version
+        run: |
+          perl -i -pe"s/9999/5436/g" src/core/git_version.h
+          perl -i -pe"s/unknown/dmdfix01/g" src/core/git_version.h
+      - name: Build
+        run: |
+          cmake -DRENDERER=GL -DPLATFORM=linux -DARCH=aarch64 -DCMAKE_BUILD_TYPE=Release -DBUILD_RPI=ON -B build/Release
+          cmake --build build/Release -- -j$(nproc)
+      - name: Stage artifacts
+        run: |
+          mkdir tmp stage
+          cp build/Release/VPinballX_GL stage
+          cp -a build/Release/*.{so,so.*} stage
+          cp -r build/Release/shaders-* stage
+          cp -r build/Release/assets stage
+          cp -r build/Release/plugins stage
+          cp -r build/Release/scripts stage
+          cp -r build/Release/docs stage
+          tar czf tmp/VPinballX_GL-dmdfix-rpi-linux-aarch64-Release.tar.gz -C stage .
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: VPinballX_GL-dmdfix-rpi-linux-aarch64
+          path: tmp/*
+          archive: false

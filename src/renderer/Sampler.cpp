@@ -485,8 +485,8 @@ void Sampler::UpdateTexture(std::shared_ptr<const BaseTexture> surf, const bool 
       else if (format == colorFormat::SRGBA)
          format = colorFormat::RGBA;
    }
-   const GLuint col_type = ((format == RGBA32F) || (format == RGB32F)) ? GL_FLOAT : ((format == RGB16F) || (format == RGBA16F)) ? GL_HALF_FLOAT : (format == RGB5) ? GL_UNSIGNED_SHORT_5_6_5 : GL_UNSIGNED_BYTE;
-   const GLuint col_format = ((format == GREY8) || (format == RED16F))                                                                                                      ? GL_RED
+   const GLuint col_type = ((format == RGBA32F) || (format == RGB32F) || (format == RED32F)) ? GL_FLOAT : ((format == RGB16F) || (format == RGBA16F) || (format == RED16F)) ? GL_HALF_FLOAT : (format == RGB5) ? GL_UNSIGNED_SHORT_5_6_5 : GL_UNSIGNED_BYTE;
+   const GLuint col_format = ((format == GREY8) || (format == RED16F) || (format == RED32F))                                                                                                      ? GL_RED
       : ((format == GREY_ALPHA) || (format == RG16F))                                                                                                                       ? GL_RG
       : ((format == RGB) || (format == RGB8) || (format == SRGB) || (format == SRGB8) || (format == RGB5) || (format == RGB10) || (format == RGB16F) || (format == RGB32F)) ? GL_RGB
                                                                                                                                                                             : GL_RGBA;
@@ -500,7 +500,16 @@ void Sampler::UpdateTexture(std::shared_ptr<const BaseTexture> surf, const bool 
    glBindTexture(m_texTarget, m_texture);
    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
    glTexSubImage2D(m_texTarget, 0, 0, 0, surf->width(), surf->height(), col_format, col_type, surf->datac());
-   glGenerateMipmap(m_texTarget);
+   // Not every GLES driver implements OES_texture_float_linear (the Raspberry Pi's V3D does not), so a 32 bit
+   // float texture is not filterable there and generating its mipmap chain is an invalid operation. Displays
+   // are point sampled (tex_dmd/displayTex are declared SF_NONE) and only ever read level 0, so skip it.
+#ifdef __OPENGLES__
+   const bool gen_mipmaps = (col_type != GL_FLOAT);
+#else
+   constexpr bool gen_mipmaps = true;
+#endif
+   if (gen_mipmaps)
+      glGenerateMipmap(m_texTarget);
    glBindTexture(m_texTarget, 0);
 
 #elif defined(ENABLE_DX9)
@@ -520,8 +529,8 @@ GLuint Sampler::CreateTexture(const std::shared_ptr<const BaseTexture>& surf, un
    const unsigned int Width = surf->width();
    const unsigned int Height = surf->height();
 
-   const GLuint col_type = ((Format == RGBA32F) || (Format == RGB32F)) ? GL_FLOAT : ((Format == RGB16F) || (Format == RGBA16F)) ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE;
-   const GLuint col_format = ((Format == GREY8) || (Format == RED16F))                                                                                                      ? GL_RED
+   const GLuint col_type = ((Format == RGBA32F) || (Format == RGB32F) || (Format == RED32F)) ? GL_FLOAT : ((Format == RGB16F) || (Format == RGBA16F) || (Format == RED16F)) ? GL_HALF_FLOAT : GL_UNSIGNED_BYTE;
+   const GLuint col_format = ((Format == GREY8) || (Format == RED16F) || (Format == RED32F))                                                                                                      ? GL_RED
       : ((Format == GREY_ALPHA) || (Format == RG16F))                                                                                                                       ? GL_RG
       : ((Format == RGB) || (Format == RGB8) || (Format == SRGB) || (Format == SRGB8) || (Format == RGB5) || (Format == RGB10) || (Format == RGB16F) || (Format == RGB32F)) ? GL_RGB
                                                                                                                                                                             : GL_RGBA;
@@ -618,7 +627,16 @@ GLuint Sampler::CreateTexture(const std::shared_ptr<const BaseTexture>& surf, un
       // This line causes a false GLIntercept error log on OpenGL >= 403 since the image is initialized through TexStorage and not TexImage (expected by GLIntercept)
       // InterceptImage::SetImageDirtyPost - Flagging an image as dirty when it is not ready/init?
       glTexSubImage2D(m_texTarget, 0, 0, 0, Width, Height, col_format, col_type, surf->datac());
-      glGenerateMipmap(m_texTarget); // Generate mip-maps, when using TexStorage will generate same amount as specified in TexStorage, otherwise good idea to limit by GL_TEXTURE_MAX_LEVEL
+   // Not every GLES driver implements OES_texture_float_linear (the Raspberry Pi's V3D does not), so a 32 bit
+   // float texture is not filterable there and generating its mipmap chain is an invalid operation. Displays
+   // are point sampled (tex_dmd/displayTex are declared SF_NONE) and only ever read level 0, so skip it.
+#ifdef __OPENGLES__
+   const bool gen_mipmaps = (col_type != GL_FLOAT);
+#else
+   constexpr bool gen_mipmaps = true;
+#endif
+      if (gen_mipmaps)
+         glGenerateMipmap(m_texTarget); // Generate mip-maps, when using TexStorage will generate same amount as specified in TexStorage, otherwise good idea to limit by GL_TEXTURE_MAX_LEVEL
    }
    return texture;
 }
