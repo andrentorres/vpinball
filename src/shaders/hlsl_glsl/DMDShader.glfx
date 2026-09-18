@@ -39,6 +39,38 @@ flat out int glLayer_gs;
 uniform sampler2D tex_dmd; // base texture for DMD (unfiltered)
 uniform sampler2D tex_sprite; // base texture for sprites (filtered)
 
+// --- Segment displays -------------------------------------------------------------
+// The OpenGL/GLES backend never had these. Upstream implements segment displays only in
+// the BGFX shader set (src/shaders/bgfx/fs_display.sc, "#ifdef SEG"), while
+// Renderer::SetupSegmentRenderer asks for display_Seg/display_Seg_world unconditionally -
+// there is no legacy fallback the way there is for DMDs. On a GL build every alphanumeric
+// table therefore aborted with "Fatal Error: Could not find shader technique
+// display_Seg_world". Ported from fs_display.sc.
+uniform vec4 alphaSegState[4];
+uniform vec4 glassTint_Roughness;
+uniform vec4 staticColor_Alpha;
+uniform vec4 w_h_height;
+uniform sampler2D displayTex;   // segment SDF atlas, 4 RGBA tiles of 4 segments each
+uniform sampler2D displayGlass; // optional dirt/scratch glass over the display
+
+#define lit               (vColor_Intensity.rgb)
+#define diffuseStrength   (vColor_Intensity.w)
+#define unlit             (staticColor_Alpha.rgb)
+#define displayOutputMode (staticColor_Alpha.w)
+#define glassTint         (glassTint_Roughness.rgb)
+#define glassRoughness    (glassTint_Roughness.w)
+#define glassAmbient      (w_h_height.rgb)
+#define hasGlass          (w_h_height.w != 0.0)
+
+// Helpers.fxh carries BURN_HIGHLIGHTS and only the inverse mapping, so the forward one
+// is defined here, matching fs_display.sc.
+#define MAX_BURST 1000.0
+float3 ReinhardToneMap(const float3 col)
+{
+   float l = min(dot(col, float3(0.176204, 0.812985, 0.0108109)), MAX_BURST);
+   return col * ((l * BURN_HIGHLIGHTS + 1.0) / (l + 1.0));
+}
+
 out vec4 color;
 #ifdef SHADER_GL410
 flat in int glLayer_gs;
@@ -261,6 +293,72 @@ void main()
    color = float4(InvGamma(vColor_Intensity.xyz * vColor_Intensity.w), 1.0);
 }
 
+////ps_main_Seg
+
+in vec2 tex0;
+
+void main()
+{
+   FS_LAYER_TO_GLOBAL;
+
+   // Rebuild the emitter UV from the glass UV instead of adding a varying. The vertex
+   // shaders write tex0 = glassArea.xy + tc * glassArea.zw, and this technique already
+   // binds glassArea and glassPad, so the padded display UV can be recovered here - which
+   // keeps the whole change inside this one file: no vertex, geometry or C++ edits.
+   float2 tc = (tex0 - glassArea.xy) / max(glassArea.zw, float2(1e-6, 1e-6));
+   float2 displayUv = tc * float2(1.0 + glassPadLeft + glassPadRight, 1.0 + glassPadTop + glassPadBottom)
+                    - float2(glassPadLeft, glassPadTop);
+
+   float4 glass;
+   float roughness;
+   if (hasGlass)
+   {
+      glass = tex2D(displayGlass, tex0);
+      glass.rgb *= glassTint;
+      roughness = mix(glass.a, 1.0, glassRoughness);
+   }
+   else
+   {
+      glass = float4(glassTint, 0.0);
+      roughness = glassRoughness;
+   }
+
+   // 16 segments stored as 4 RGBA tiles, one SDF per channel. Resolving each SDF against
+   // its own screen-space gradient antialiases the segment borders, which matters here
+   // because the display is always downscaled at AAFactor 0.5.
+   float4 litLum4 = float4(0.0, 0.0, 0.0, 0.0);
+   float4 unlitLum4 = float4(0.0, 0.0, 0.0, 0.0);
+   UNROLL for (int i = 0; i < 4; i++)
+   {
+      float4 sdf = tex2D(displayTex, float2(0.25 * (displayUv.x + float(i)), displayUv.y));
+      float4 aa = max(0.5 * (abs(dFdx(sdf)) + abs(dFdy(sdf))), float4(0.025, 0.025, 0.025, 0.025));
+      float4 sharp = smoothstep(float4(0.5, 0.5, 0.5, 0.5) - aa, float4(0.5, 0.5, 0.5, 0.5) + aa, sdf);
+      float4 diffuse = diffuseStrength * sdf * sdf; // light dispersion at max glass roughness
+      float4 light = mix(sharp, diffuse, roughness);
+      // max rather than a sum: neighbouring segments overlap at the corners and would
+      // otherwise be overlit there
+      unlitLum4 = max(light, unlitLum4);
+      litLum4 = max(light * alphaSegState[i], litLum4);
+   }
+   float3 litLum = float3(max(max(litLum4.x, litLum4.y), max(litLum4.z, litLum4.w)));
+   float unlitLum = max(max(unlitLum4.x, unlitLum4.y), max(unlitLum4.z, unlitLum4.w));
+
+   float3 lum = unlitLum * unlit + litLum * lit;
+   if (hasGlass)
+      lum = mix(lum, glassAmbient, 0.5 * glass.a);
+   lum *= glass.rgb;
+
+   float3 outLum;
+   if (displayOutputMode == 0.0)      // linear color space, no tonemap
+      outLum = lum;
+   else if (displayOutputMode == 1.0) // Reinhard, linear
+      outLum = ReinhardToneMap(lum);
+   else                               // Reinhard, sRGB
+      outLum = FBGamma(ReinhardToneMap(lum));
+
+   color = float4(outLum, 1.0);
+}
+
 ////TECHNIQUES
 
 basic_DMD:P0:vs_main():gs_simple_main():ps_main_DMD()
@@ -268,3 +366,5 @@ basic_DMD_world:P0:vs_simple_world():gs_simple_world():ps_main_DMD()
 basic_noDMD:P0:vs_main():gs_simple_main():ps_main_noDMD()
 basic_noDMD_world:P0:vs_simple_world():gs_simple_world():ps_main_noDMD()
 basic_noDMD_notex:P0:vs_main():gs_simple_main():ps_main_noDMD_notex()
+display_Seg:P0:vs_main():gs_simple_main():ps_main_Seg()
+display_Seg_world:P0:vs_simple_world():gs_simple_world():ps_main_Seg()
